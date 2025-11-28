@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmniWeather: AI 气象与全息生态终端</title>
+    
+    <!-- 样式与图标 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    
+    <!-- AI 与 视觉库 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- OrbitControls 用于地球旋转 -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <style>
+        body {
+            font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+            background-color: #050505;
+            color: white;
+            margin: 0;
+            overflow: hidden; 
+        }
+
+        /* 3D 画布层 */
+        #canvas-wrapper {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 0;
+            pointer-events: auto; 
+        }
+
+        /* UI 层: 默认穿透 */
+        #ui-container {
+            position: relative;
+            z-index: 10;
+            height: 100vh;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+            pointer-events: none; 
+        }
+
+        /* 恢复交互的元素 */
+        nav, 
+        .glass-panel, 
+        input, 
+        button,
+        .pointer-auto {
+            pointer-events: auto; 
+        }
+
+        /* 仪表盘视图：需要支持页面滚动 */
+        #view-dashboard {
+            pointer-events: auto; 
+        }
+
+        /* 地球视图：保持穿透，以便拖拽地球 */
+        #view-earth {
+            pointer-events: none;
+        }
+
+        /* 玻璃拟态 */
+        .glass-panel {
+            background: rgba(18, 25, 38, 0.75);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+        }
+        .glass-panel:hover {
+            border-color: rgba(255, 255, 255, 0.25);
+            background: rgba(25, 35, 50, 0.85);
+            transform: translateY(-2px);
+        }
+
+        /* CNN 动画关键帧 */
+        @keyframes scan {
+            0% { left: 0%; opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { left: 85%; opacity: 0; }
+        }
+        .cnn-kernel {
+            position: absolute;
+            top: 0; bottom: 0; width: 15%;
+            background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.3), transparent);
+            border-left: 1px solid rgba(59, 130, 246, 0.8);
+            border-right: 1px solid rgba(59, 130, 246, 0.8);
+            animation: scan 2s linear infinite;
+            pointer-events: none;
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.2);
+        }
+
+        /* 地球标注标签 */
+        .earth-label {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            pointer-events: none;
+            color: #e2e8f0;
+            border: 1px solid rgba(59, 130, 246, 0.4);
+            white-space: nowrap;
+            opacity: 0;
+            transition: opacity 0.3s;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+        }
+        .earth-label::before {
+            content: '';
+            position: absolute;
+            bottom: -6px; left: 50%;
+            transform: translateX(-50%);
+            border-width: 6px 6px 0;
+            border-style: solid;
+            border-color: rgba(59, 130, 246, 0.4) transparent transparent transparent;
+        }
+        .earth-label.visible { opacity: 1; }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .page-section {
+            display: none;
+            animation: fadeScale 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        .page-section.active { display: block; }
+        @keyframes fadeScale {
+            from { opacity: 0; transform: scale(0.96) translateY(20px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
+        /* 推荐图片卡片 */
+        .travel-card {
+            background-size: cover;
+            background-position: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .travel-card::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 1. 全局 3D 渲染容器 (Three.js) -->
+    <div id="canvas-wrapper"></div>
+    
+    <!-- 2. 手势摄像头 (隐藏) -->
+    <video id="video-input" class="hidden" playsinline></video>
+
+    <!-- 3. 主界面容器 -->
+    <div id="ui-container" class="no-scrollbar">
+        
+        <!-- 顶部导航栏 -->
+        <nav class="sticky top-0 z-50 p-4 backdrop-blur-md bg-black/40 border-b border-white/5">
+            <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center animate-pulse shadow-[0_0_15px_rgba(37,99,235,0.6)]">
+                        <i class="ph ph-planet text-2xl"></i>
+                    </div>
+                    <h1 class="font-bold text-xl tracking-wider">OMNI <span class="text-blue-400">WEATHER</span></h1>
+                </div>
+
+                <!-- 视图切换器 -->
+                <div class="flex bg-white/5 p-1 rounded-lg pointer-auto border border-white/10">
+                    <button onclick="App.switchView('dashboard')" id="btn-dashboard" class="px-6 py-2 rounded-md text-sm font-bold transition-all bg-blue-600 shadow-lg text-white">
+                        <i class="ph ph-chart-line-up mr-2"></i> 气象数据舱
+                    </button>
+                    <button onclick="App.switchView('earth')" id="btn-earth" class="px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white hover:bg-white/5">
+                        <i class="ph ph-globe-hemisphere-west mr-2"></i> 全息地球仪
+                    </button>
+                </div>
+
+                <div class="flex gap-2 pointer-auto">
+                    <button onclick="SuggestionBox.open()" class="glass-panel p-2.5 rounded-lg text-yellow-400 hover:bg-yellow-400/20" title="建议箱">
+                        <i class="ph ph-lightbulb text-xl"></i>
+                    </button>
+                    <button onclick="GestureCtrl.toggle()" id="btn-gesture" class="glass-panel p-2.5 rounded-lg text-purple-400 hover:bg-purple-400/20" title="开启手势控制">
+                        <i class="ph ph-hand-waving text-xl"></i>
+                    </button>
+                </div>
+            </div>
+        </nav>
+
+        <!-- 页面 1: 气象数据舱 (Dashboard) -->
+        <section id="view-dashboard" class="page-section active max-w-7xl mx-auto p-4 md:p-8 pb-20">
+            
+            <!-- 搜索栏 -->
+            <div class="mb-8 flex gap-3 max-w-lg mx-auto md:mx-0">
+                <input type="text" id="city-input" placeholder="输入城市名称 (如：Beijing, Tokyo)..." 
+                       class="flex-1 bg-slate-800/80 border border-white/20 rounded-xl px-5 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none backdrop-blur-xl transition-all">
+                <button onclick="WeatherCore.search()" class="bg-blue-600 hover:bg-blue-500 px-6 rounded-xl font-bold transition shadow-lg shadow-blue-900/50 flex items-center">
+                    <i class="ph ph-magnifying-glass mr-2"></i> 搜索
+                </button>
+            </div>
+
+            <!-- 顶部数据区 -->
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 mb-8">
+                <!-- 左侧主天气卡 -->
+                <div class="lg:col-span-8 glass-panel rounded-3xl p-8 relative overflow-hidden group">
+                    <div class="absolute right-0 top-0 w-80 h-80 bg-blue-500/20 rounded-full blur-[80px] -mr-16 -mt-16 pointer-events-none mix-blend-screen"></div>
+                    
+                    <div class="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 relative z-10">
+                        <div>
+                            <div class="flex items-center gap-3 mb-2">
+                                <i class="ph ph-map-pin text-blue-400 text-2xl"></i>
+                                <h2 id="city-name" class="text-4xl md:text-6xl font-bold tracking-tight">加载中...</h2>
+                            </div>
+                            <p id="current-date" class="text-blue-200/80 text-lg font-mono">--</p>
+                            <div class="mt-8 flex items-baseline gap-6">
+                                <span id="temp-val" class="text-8xl font-bold bg-gradient-to-br from-white via-blue-100 to-blue-300 bg-clip-text text-transparent drop-shadow-lg">--</span>
+                                <div class="flex flex-col text-xl text-gray-300 border-l-2 border-white/10 pl-4">
+                                    <span id="weather-desc" class="text-2xl text-white font-medium">--</span>
+                                    <span class="text-sm text-gray-500 mt-1">实时监测 AI-Link</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-right space-y-3 w-full md:w-auto">
+                            <div class="glass-panel px-5 py-3 rounded-xl flex items-center justify-between gap-4 border-l-4 border-blue-500">
+                                <span class="text-gray-400 text-sm">湿度</span>
+                                <span class="text-xl font-bold flex items-center"><i class="ph ph-drop text-blue-400 mr-2"></i><span id="humidity">--%</span></span>
+                            </div>
+                            <div class="glass-panel px-5 py-3 rounded-xl flex items-center justify-between gap-4 border-l-4 border-teal-500">
+                                <span class="text-gray-400 text-sm">风速</span>
+                                <span class="text-xl font-bold flex items-center"><i class="ph ph-wind text-teal-400 mr-2"></i><span id="wind">--</span></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 右侧 CNN 预测 -->
+                <div class="lg:col-span-4 glass-panel rounded-3xl p-6 flex flex-col relative overflow-hidden">
+                    <div class="flex justify-between items-center mb-6">
+                        <h3 class="font-bold flex items-center gap-2 text-lg">
+                            <i class="ph ph-brain text-pink-500 text-xl"></i> 神经网络预测
+                        </h3>
+                        <span class="text-[10px] font-mono uppercase bg-pink-500/10 text-pink-300 px-2 py-1 rounded border border-pink-500/30">LSTM + ARIMA</span>
+                    </div>
+
+                    <div class="flex-1 flex flex-col justify-center gap-6">
+                        <!-- 1. 输入层 -->
+                        <div class="space-y-2">
+                            <div class="text-xs text-gray-400 flex justify-between font-mono">
+                                <span>INPUT_TENSOR (Hist)</span>
+                                <span>KERNEL_SCAN</span>
+                            </div>
+                            <div class="h-16 flex items-end gap-1 relative bg-black/40 rounded-lg p-2 border border-white/5" id="cnn-input">
+                                <div class="cnn-kernel z-20"></div>
+                            </div>
+                        </div>
+
+                        <!-- 2. 输出层 -->
+                        <div class="space-y-2">
+                            <div class="text-xs text-gray-400 font-mono">PREDICTION (Next 5 Days)</div>
+                            <div class="grid grid-cols-5 gap-2 text-center" id="cnn-output"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 中部：AI 建议 -->
+            <div class="glass-panel rounded-2xl p-6 mb-8 border-l-4 border-purple-500 flex flex-col md:flex-row items-center gap-6">
+                <div class="w-16 h-16 rounded-full bg-purple-500/20 flex items-center justify-center text-3xl shrink-0">
+                    🤖
+                </div>
+                <div>
+                    <h3 class="text-purple-300 font-bold mb-1 text-lg">AI 生活管家建议</h3>
+                    <p id="suggestion-desc" class="text-gray-300 leading-relaxed">正在分析环境数据...</p>
+                </div>
+            </div>
+
+            <!-- 新增：城市探索与推荐 -->
+            <div class="border-t border-white/10 pt-8 mt-8">
+                <div class="flex items-center gap-3 mb-6">
+                    <i class="ph ph-compass text-3xl text-orange-400"></i>
+                    <h2 class="text-2xl font-bold">城市探索指南 <span class="text-sm font-normal text-gray-500 ml-2">Local Guide</span></h2>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <!-- 1. 必吃美食 -->
+                    <div class="glass-panel rounded-2xl p-5">
+                        <h3 class="text-lg font-bold mb-4 flex items-center text-orange-300">
+                            <i class="ph ph-bowl-food mr-2"></i> 必尝美食
+                        </h3>
+                        <div id="food-list" class="space-y-3">
+                            <!-- JS 填充 -->
+                            <div class="animate-pulse flex space-x-4">
+                                <div class="rounded-full bg-white/10 h-10 w-10"></div>
+                                <div class="flex-1 space-y-2 py-1">
+                                    <div class="h-2 bg-white/10 rounded w-3/4"></div>
+                                    <div class="h-2 bg-white/10 rounded"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 2. 热门景点 -->
+                    <div class="glass-panel rounded-2xl p-5">
+                        <h3 class="text-lg font-bold mb-4 flex items-center text-green-300">
+                            <i class="ph ph-binoculars mr-2"></i> 热门景点
+                        </h3>
+                        <div id="spot-list" class="space-y-3">
+                            <!-- JS 填充 -->
+                        </div>
+                    </div>
+
+                    <!-- 3. 印象图集 -->
+                    <div class="glass-panel rounded-2xl p-5">
+                        <h3 class="text-lg font-bold mb-4 flex items-center text-blue-300">
+                            <i class="ph ph-image mr-2"></i> 城市印象
+                        </h3>
+                        <div class="grid grid-cols-2 gap-2 h-40">
+                            <div class="travel-card rounded-lg bg-gray-800 flex items-center justify-center group relative cursor-pointer">
+                                <i class="ph ph-camera text-2xl text-white/50 group-hover:scale-110 transition"></i>
+                                <span class="absolute bottom-1 left-2 text-[10px] text-gray-300">City View</span>
+                            </div>
+                            <div class="travel-card rounded-lg bg-gray-700 flex items-center justify-center group relative cursor-pointer">
+                                <i class="ph ph-users text-2xl text-white/50 group-hover:scale-110 transition"></i>
+                                <span class="absolute bottom-1 left-2 text-[10px] text-gray-300">Culture</span>
+                            </div>
+                            <div class="travel-card rounded-lg bg-gray-700 flex items-center justify-center group relative cursor-pointer">
+                                <i class="ph ph-fork-knife text-2xl text-white/50 group-hover:scale-110 transition"></i>
+                                <span class="absolute bottom-1 left-2 text-[10px] text-gray-300">Food</span>
+                            </div>
+                            <div class="travel-card rounded-lg bg-gray-800 flex items-center justify-center group relative cursor-pointer">
+                                <i class="ph ph-buildings text-2xl text-white/50 group-hover:scale-110 transition"></i>
+                                <span class="absolute bottom-1 left-2 text-[10px] text-gray-300">Night</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- 页面 2: 生态地球仪 (Earth) -->
+        <section id="view-earth" class="page-section max-w-7xl mx-auto p-4 md:p-8 h-[90vh] relative">
+            
+            <!-- 悬浮控制面板 -->
+            <div class="absolute top-4 left-4 z-20 glass-panel p-5 rounded-xl max-w-xs pointer-auto border-l-4 border-blue-500">
+                <h3 class="font-bold mb-1 text-lg">Holo-Earth V2.0</h3>
+                <p class="text-xs text-gray-400 mb-4 font-mono">Real-time Ecological Monitoring</p>
+                <div class="space-y-3 text-sm">
+                    <div class="flex items-center justify-between">
+                        <span class="text-gray-400">Atmosphere</span>
+                        <span class="text-green-400 text-xs px-2 py-0.5 bg-green-400/10 rounded">Active</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-gray-400">Markers</span>
+                        <span id="marker-count" class="text-blue-400 font-mono">Loading...</span>
+                    </div>
+                </div>
+                <div class="mt-4 pt-4 border-t border-white/10 text-xs text-gray-500">
+                    * 双击可聚焦位置<br>
+                    * 拖拽旋转，滚轮缩放
+                </div>
+            </div>
+
+            <!-- 2D 标签层 -->
+            <div id="earth-labels-container" class="absolute inset-0 pointer-events-none z-10 overflow-hidden"></div>
+        </section>
+
+    </div>
+
+    <!-- 建议箱 Modal -->
+    <div id="suggestion-modal" class="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4 pointer-auto">
+        <div class="glass-panel w-full max-w-md p-6 rounded-2xl transform scale-95 opacity-0 transition-all duration-300" id="suggestion-content">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold">💡 用户建议箱</h3>
+                <button onclick="SuggestionBox.close()" class="text-gray-400 hover:text-white"><i class="ph ph-x text-xl"></i></button>
+            </div>
+            <textarea class="w-full bg-black/30 border border-white/10 rounded-xl p-3 text-white h-32 focus:ring-1 focus:ring-blue-500 outline-none mb-4" placeholder="在此输入您的建议..."></textarea>
+            <div class="flex justify-end gap-3">
+                <button onclick="SuggestionBox.close()" class="px-4 py-2 text-sm text-gray-400 hover:text-white">取消</button>
+                <button onclick="SuggestionBox.submit()" class="px-6 py-2 bg-blue-600 rounded-lg text-sm font-bold shadow-lg hover:bg-blue-500">提交建议</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 加载层 -->
+    <div id="loading-overlay" class="fixed inset-0 z-[200] bg-[#020205] flex flex-col items-center justify-center transition-opacity duration-700 pointer-events-none">
+        <div class="relative w-20 h-20 mb-6">
+            <div class="absolute inset-0 border-4 border-blue-600/30 rounded-full"></div>
+            <div class="absolute inset-0 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            <div class="absolute inset-4 bg-blue-500/20 rounded-full blur-md animate-pulse"></div>
+        </div>
+        <div class="text-blue-400 font-mono text-sm tracking-[0.2em] animate-pulse">INITIALIZING CORE...</div>
+    </div>
+
+    <script>
+        /**
+         * 状态管理
+         */
+        const App = {
+            currentView: 'dashboard',
+            targetCityCoords: null, // 存储当前搜索城市的坐标
+            
+            init() {
+                ThreeEngine.init();
+                WeatherCore.init();
+                setTimeout(() => {
+                    const loader = document.getElementById('loading-overlay');
+                    loader.classList.add('opacity-0');
+                    loader.style.pointerEvents = 'none'; 
+                }, 1500);
+            },
+
+            switchView(viewName) {
+                document.querySelectorAll('.page-section').forEach(el => el.classList.remove('active'));
+                document.getElementById(`view-${viewName}`).classList.add('active');
+                
+                const btnDash = document.getElementById('btn-dashboard');
+                const btnEarth = document.getElementById('btn-earth');
+                
+                if (viewName === 'dashboard') {
+                    btnDash.className = "px-6 py-2 rounded-md text-sm font-bold transition-all bg-blue-600 shadow-lg text-white";
+                    btnEarth.className = "px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white hover:bg-white/5";
+                    ThreeEngine.switchScene('particles');
+                } else {
+                    btnEarth.className = "px-6 py-2 rounded-md text-sm font-bold transition-all bg-green-600 shadow-lg text-white";
+                    btnDash.className = "px-6 py-2 rounded-md text-sm font-bold transition-all text-gray-400 hover:text-white hover:bg-white/5";
+                    ThreeEngine.switchScene('earth');
+                    
+                    // 如果有目标城市，自动旋转地球
+                    if(this.targetCityCoords) {
+                        ThreeEngine.rotateTo(this.targetCityCoords.lat, this.targetCityCoords.lon);
+                    }
+                }
+                this.currentView = viewName;
+            }
+        };
+
+        /**
+         * 3D 引擎 (Shader升级版)
+         */
+        const ThreeEngine = {
+            renderer: null, camera: null, activeScene: null, controls: null,
+            scenes: { particles: null, earth: null },
+            earthGroup: null, markers: [], earthMesh: null,
+
+            // 大气层 Shader
+            vertexShader: `
+                varying vec3 vNormal;
+                void main() {
+                    vNormal = normalize(normalMatrix * normal);
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vNormal;
+                void main() {
+                    float intensity = pow(0.6 - dot(vNormal, vec3(0, 0, 1.0)), 4.0);
+                    gl_FragColor = vec4(0.3, 0.6, 1.0, 1.0) * intensity * 1.5;
+                }
+            `,
+
+            init() {
+                const container = document.getElementById('canvas-wrapper');
+                this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                container.appendChild(this.renderer.domElement);
+
+                this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.camera.position.z = 12;
+
+                this.initParticleScene();
+                this.initEarthScene();
+                this.activeScene = this.scenes.particles;
+                this.animate();
+                window.addEventListener('resize', () => this.onResize());
+            },
+
+            // 粒子场景 (保持简约)
+            initParticleScene() {
+                const scene = new THREE.Scene();
+                const geometry = new THREE.BufferGeometry();
+                const count = 3000;
+                const pos = new Float32Array(count * 3);
+                for(let i=0; i<count*3; i++) pos[i] = (Math.random()-0.5)*20;
+                geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+                
+                const mat = new THREE.PointsMaterial({
+                    size: 0.05, color: 0x3b82f6, transparent: true, opacity: 0.6
+                });
+                this.particles = new THREE.Points(geometry, mat);
+                scene.add(this.particles);
+                this.scenes.particles = scene;
+            },
+
+            // 增强版地球场景
+            initEarthScene() {
+                const scene = new THREE.Scene();
+                
+                // 灯光增强
+                const ambient = new THREE.AmbientLight(0xffffff, 0.2); 
+                scene.add(ambient);
+                const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+                sunLight.position.set(5, 3, 5);
+                scene.add(sunLight);
+                // 蓝色背光，增加科幻感
+                const backLight = new THREE.PointLight(0x0055ff, 1, 100);
+                backLight.position.set(-5, -5, -10);
+                scene.add(backLight);
+
+                // 星空
+                const starGeo = new THREE.BufferGeometry();
+                const starCount = 3000;
+                const starPos = new Float32Array(starCount * 3);
+                for(let i=0; i<starCount*3; i++) starPos[i] = (Math.random()-0.5)*150;
+                starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+                const starMat = new THREE.PointsMaterial({color: 0xaaaaaa, size: 0.1, transparent: true});
+                scene.add(new THREE.Points(starGeo, starMat));
+
+                this.earthGroup = new THREE.Group();
+
+                // 1. 程序化地球纹理 (Canvas) - 增加细节
+                const mapTexture = this.createProceduralEarthTexture();
+                const bumpTexture = this.createProceduralBumpMap(); // 简单的凹凸贴图
+                
+                const earthGeo = new THREE.SphereGeometry(3.5, 64, 64);
+                const earthMat = new THREE.MeshPhongMaterial({
+                    map: mapTexture,
+                    bumpMap: bumpTexture,
+                    bumpScale: 0.05,
+                    specularMap: bumpTexture, // 海洋反光，陆地哑光
+                    specular: new THREE.Color(0x333333),
+                    shininess: 15
+                });
+                this.earthMesh = new THREE.Mesh(earthGeo, earthMat);
+                this.earthGroup.add(this.earthMesh);
+
+                // 2. 大气层辉光 (Shader)
+                const atmosGeo = new THREE.SphereGeometry(3.5 + 0.3, 64, 64); // 稍大一点
+                const atmosMat = new THREE.ShaderMaterial({
+                    vertexShader: this.vertexShader,
+                    fragmentShader: this.fragmentShader,
+                    blending: THREE.AdditiveBlending,
+                    side: THREE.BackSide,
+                    transparent: true
+                });
+                const atmosphere = new THREE.Mesh(atmosGeo, atmosMat);
+                this.earthGroup.add(atmosphere);
+
+                // 3. 真实地理标记
+                // 格式: [lat, lon, label, emoji, isCapital]
+                const realLocations = [
+                    [39.9042, 116.4074, "Beijing", "🇨🇳", true],
+                    [31.2304, 121.4737, "Shanghai", "🏙️", false],
+                    [35.6762, 139.6503, "Tokyo", "🇯🇵", true],
+                    [40.7128, -74.0060, "New York", "🇺🇸", false],
+                    [51.5074, -0.1278, "London", "🇬🇧", true],
+                    [48.8566, 2.3522, "Paris", "🇫🇷", true],
+                    [-33.8688, 151.2093, "Sydney", "🇦🇺", false],
+                    [55.7558, 37.6173, "Moscow", "🇷🇺", true],
+                    [1.3521, 103.8198, "Singapore", "🇸🇬", true],
+                    [25.2048, 55.2708, "Dubai", "🇦🇪", false],
+                    [-22.9068, -43.1729, "Rio", "🇧🇷", false],
+                    [30.0444, 31.2357, "Cairo", "🇪🇬", true],
+                    [19.0760, 72.8777, "Mumbai", "🇮🇳", false]
+                ];
+                
+                realLocations.forEach(loc => this.addMarker(loc[0], loc[1], loc[2], loc[3], loc[4]));
+                document.getElementById('marker-count').textContent = realLocations.length;
+
+                scene.add(this.earthGroup);
+                this.scenes.earth = scene;
+
+                // 控制器
+                this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.enableDamping = true;
+                this.controls.dampingFactor = 0.05;
+                this.controls.enableZoom = true;
+                this.controls.minDistance = 5;
+                this.controls.maxDistance = 20;
+                this.controls.enabled = false;
+            },
+
+            // 生成更复杂的程序化贴图
+            createProceduralEarthTexture() {
+                const canvas = document.createElement('canvas');
+                canvas.width = 1024; canvas.height = 512;
+                const ctx = canvas.getContext('2d');
+                
+                // 深蓝海洋背景
+                ctx.fillStyle = '#001a33';
+                ctx.fillRect(0,0,1024,512);
+                
+                // 模拟大陆块 (随机噪点 + 平滑)
+                for(let i=0; i<300; i++) {
+                    const x = Math.random() * 1024;
+                    const y = Math.random() * 512;
+                    const r = Math.random() * 40 + 10;
+                    
+                    const grad = ctx.createRadialGradient(x,y,0, x,y,r);
+                    grad.addColorStop(0, 'rgba(40, 100, 40, 0.8)'); // 绿色陆地
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(x,y,r,0,Math.PI*2);
+                    ctx.fill();
+                }
+
+                // 模拟云层
+                for(let i=0; i<150; i++) {
+                    const x = Math.random() * 1024;
+                    const y = Math.random() * 512;
+                    const r = Math.random() * 60 + 20;
+                    ctx.fillStyle = `rgba(255,255,255, ${Math.random()*0.15})`;
+                    ctx.beginPath();
+                    ctx.arc(x,y,r,0,Math.PI*2);
+                    ctx.fill();
+                }
+
+                return new THREE.CanvasTexture(canvas);
+            },
+            
+            // 简单的 Specular/Bump Map
+            createProceduralBumpMap() {
+                const canvas = document.createElement('canvas');
+                canvas.width = 1024; canvas.height = 512;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#000000'; // 海洋是黑的（光滑/低地）
+                ctx.fillRect(0,0,1024,512);
+                
+                // 重复上面的陆地逻辑，但是用白色
+                for(let i=0; i<300; i++) {
+                    const x = Math.random() * 1024;
+                    const y = Math.random() * 512;
+                    const r = Math.random() * 40 + 10;
+                    const grad = ctx.createRadialGradient(x,y,0, x,y,r);
+                    grad.addColorStop(0, 'rgba(255, 255, 255, 0.5)'); 
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(x,y,r,0,Math.PI*2);
+                    ctx.fill();
+                }
+                return new THREE.CanvasTexture(canvas);
+            },
+
+            addMarker(lat, lon, text, emoji, isCapital) {
+                const phi = (90 - lat) * (Math.PI / 180);
+                const theta = (lon + 180) * (Math.PI / 180);
+                const r = 3.6; // 在地球半径(3.5)之外
+                
+                const x = -(r * Math.sin(phi) * Math.cos(theta));
+                const z = (r * Math.sin(phi) * Math.sin(theta));
+                const y = (r * Math.cos(phi));
+
+                const div = document.createElement('div');
+                div.className = 'earth-label';
+                div.innerHTML = `<span class="text-base mr-1">${emoji}</span> <span class="${isCapital ? 'font-bold text-white' : 'text-gray-300'}">${text}</span>`;
+                document.getElementById('earth-labels-container').appendChild(div);
+
+                // 添加 3D 锚点 (一个小光点)
+                const pointGeo = new THREE.SphereGeometry(0.04, 8, 8);
+                const pointMat = new THREE.MeshBasicMaterial({color: isCapital ? 0xffaa00 : 0x00ffff});
+                const mesh = new THREE.Mesh(pointGeo, pointMat);
+                mesh.position.set(x, y, z);
+                this.earthGroup.add(mesh);
+
+                this.markers.push({
+                    position: mesh.position, // 使用 mesh 的位置
+                    element: div
+                });
+            },
+
+            rotateTo(lat, lon) {
+                if(!this.controls) return;
+                // 将经纬度转为相机位置
+                // 简单的做法：旋转 earthGroup 让目标点对着相机
+                // 但这里我们使用 OrbitControls，更好的是移动相机
+                // 这里暂不做复杂动画，仅提示
+                console.log(`Rotating to ${lat}, ${lon}`);
+                
+                // 简易实现：直接改变 earthGroup 的旋转 (需要重置)
+                // 实际上让 OrbitControls 移动比较平滑，需要计算 Spherical
+                const phi = (90 - lat) * (Math.PI / 180);
+                const theta = (lon + 180) * (Math.PI / 180);
+                
+                // 移动相机位置 (保持半径)
+                const r = 12;
+                const x = -(r * Math.sin(phi) * Math.cos(theta));
+                const z = (r * Math.sin(phi) * Math.sin(theta));
+                const y = (r * Math.cos(phi));
+                
+                // 简单的瞬移，实际项目中建议用 TWEEN.js 补间动画
+                this.camera.position.set(x, y, z);
+                this.camera.lookAt(0, 0, 0);
+                this.controls.update();
+            },
+
+            updateMarkers() {
+                if(App.currentView !== 'earth') return;
+                const tempV = new THREE.Vector3();
+                
+                for(const marker of this.markers) {
+                    tempV.copy(marker.position);
+                    // 标记跟随地球旋转
+                    tempV.applyMatrix4(this.earthGroup.matrixWorld);
+                    
+                    // 判断可见性 (遮挡剔除)
+                    const cameraToEarth = this.camera.position.distanceTo(this.earthGroup.position);
+                    const cameraToPoint = this.camera.position.distanceTo(tempV);
+                    
+                    // 只有当点比地球中心离相机更近时显示 (粗略)
+                    // 或者使用法线判断：
+                    const vNormal = tempV.clone().sub(this.earthGroup.position).normalize();
+                    const vView = this.camera.position.clone().sub(this.earthGroup.position).normalize();
+                    const dot = vNormal.dot(vView);
+
+                    if(dot > 0.2) { 
+                        // 转屏幕坐标
+                        tempV.project(this.camera);
+                        const x = (tempV.x * .5 + .5) * window.innerWidth;
+                        const y = (tempV.y * -.5 + .5) * window.innerHeight;
+                        
+                        marker.element.style.transform = `translate(-50%, -100%) translate(${x}px, ${y-10}px)`;
+                        marker.element.classList.add('visible');
+                    } else {
+                        marker.element.classList.remove('visible');
+                    }
+                }
+            },
+
+            switchScene(name) {
+                this.activeScene = this.scenes[name];
+                const labels = document.getElementById('earth-labels-container');
+                
+                if(name === 'earth') {
+                    this.controls.enabled = true;
+                    this.renderer.domElement.style.pointerEvents = 'all'; 
+                    labels.style.display = 'block';
+                    // 自动旋转一点增加动态感
+                } else {
+                    this.controls.enabled = false;
+                    this.camera.position.set(0, 0, 12);
+                    this.camera.lookAt(0,0,0);
+                    this.renderer.domElement.style.pointerEvents = 'none'; 
+                    labels.style.display = 'none';
+                }
+            },
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                
+                if (App.currentView === 'dashboard') {
+                    if(this.particles) this.particles.rotation.y += 0.001;
+                } else {
+                    this.controls.update();
+                    // 地球自转 (如果用户没在拖拽)
+                    // this.earthGroup.rotation.y += 0.0005;
+                    this.updateMarkers();
+                    
+                    // 简单的云层移动效果（如果有独立云层Mesh）
+                }
+                this.renderer.render(this.activeScene, this.camera);
+            },
+            
+            onResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        };
+
+        /**
+         * 气象与业务核心
+         */
+        const WeatherCore = {
+            init() {
+                document.getElementById('city-input').addEventListener('keypress', (e) => {
+                    if(e.key === 'Enter') this.search();
+                });
+                this.fetchWeather('Beijing');
+            },
+
+            async search() {
+                const city = document.getElementById('city-input').value.trim();
+                if(city) this.fetchWeather(city);
+            },
+
+            async fetchWeather(city) {
+                try {
+                    // 1. 获取坐标
+                    const geoRes = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`).then(r=>r.json());
+                    if(!geoRes.results || geoRes.results.length === 0) throw new Error("未找到城市");
+                    
+                    const { latitude, longitude, name } = geoRes.results[0];
+                    App.targetCityCoords = { lat: latitude, lon: longitude };
+
+                    // 2. 获取真实天气
+                    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,uv_index_max&timezone=auto&forecast_days=7`;
+                    const weatherData = await fetch(weatherUrl).then(r=>r.json());
+
+                    // 3. 连接我们的 Python 后端获取 AI 分析和推荐
+                    // 注意：这里需要 Python 后端运行。如果不运行，使用 Mock 数据。
+                    let aiData = null;
+                    try {
+                        const aiRes = await fetch(`http://127.0.0.1:5000/api/analyze?city=${name}`);
+                        if(aiRes.ok) aiData = await aiRes.json();
+                    } catch(e) {
+                        console.warn("后端连接失败，使用本地兜底逻辑", e);
+                        // 本地兜底数据结构
+                        aiData = {
+                            travel: {
+                                food: [{name:"Local Food", desc:"Connect backend for details", icon:"🍲"}],
+                                spots: [{name:"Local Spot", desc:"Connect backend for details", tag:"View"}]
+                            },
+                            advice: "后端离线模式：请确保 app.py 已运行。"
+                        };
+                    }
+
+                    this.renderUI(name, weatherData, aiData);
+                    CNNSimulator.run(weatherData.daily.temperature_2m_max);
+
+                } catch(e) {
+                    alert("获取数据失败：" + e.message);
+                }
+            },
+
+            renderUI(name, wData, aiData) {
+                const current = wData.current;
+                
+                // 基础天气
+                document.getElementById('city-name').textContent = name;
+                document.getElementById('current-date').textContent = new Date().toLocaleDateString('zh-CN', {weekday:'long', month:'short', day:'numeric'});
+                document.getElementById('temp-val').textContent = Math.round(current.temperature_2m) + '°';
+                document.getElementById('weather-desc').textContent = this.getWeatherDesc(current.weather_code);
+                document.getElementById('humidity').textContent = current.relative_humidity_2m + '%';
+                document.getElementById('wind').textContent = current.wind_speed_10m + ' km/h';
+
+                // AI 建议
+                document.getElementById('suggestion-desc').textContent = aiData ? aiData.advice : "正在分析气象数据...";
+
+                // 旅游推荐渲染
+                if(aiData && aiData.travel) {
+                    const foodList = document.getElementById('food-list');
+                    const spotList = document.getElementById('spot-list');
+                    
+                    foodList.innerHTML = aiData.travel.food.map(f => `
+                        <div class="flex items-start gap-3 p-2 hover:bg-white/5 rounded-lg transition">
+                            <div class="text-2xl">${f.icon}</div>
+                            <div>
+                                <div class="font-bold text-sm text-white">${f.name}</div>
+                                <div class="text-xs text-gray-400">${f.desc}</div>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    spotList.innerHTML = aiData.travel.spots.map(s => `
+                        <div class="flex items-center justify-between p-2 hover:bg-white/5 rounded-lg transition">
+                            <div>
+                                <div class="font-bold text-sm text-white">${s.name}</div>
+                                <div class="text-xs text-gray-400">${s.desc}</div>
+                            </div>
+                            <span class="text-[10px] border border-green-500/30 text-green-400 px-2 py-0.5 rounded">${s.tag}</span>
+                        </div>
+                    `).join('');
+                }
+            },
+
+            getWeatherDesc(code) {
+                const map = { 0:'晴朗', 1:'多云', 2:'阴天', 3:'阴', 45:'雾', 51:'小雨', 61:'雨', 63:'大雨', 71:'雪', 95:'雷暴' };
+                return map[code] || '未知';
+            }
+        };
+
+        const CNNSimulator = {
+            run(historyTemps) {
+                const inputContainer = document.getElementById('cnn-input');
+                const outContainer = document.getElementById('cnn-output');
+                
+                // 清理旧元素 (保留 kernel)
+                Array.from(inputContainer.children).forEach(c => {
+                    if(!c.classList.contains('cnn-kernel')) c.remove();
+                });
+                outContainer.innerHTML = '';
+
+                // 输入层可视化
+                const inputs = historyTemps.slice(0, 5); 
+                const maxT = Math.max(...inputs, 35);
+                
+                inputs.forEach(t => {
+                    const h = (t / maxT) * 100;
+                    const bar = document.createElement('div');
+                    bar.className = 'flex-1 bg-blue-500/40 hover:bg-blue-400 rounded-sm mx-0.5 relative transition-all duration-300';
+                    bar.style.height = `${h}%`;
+                    inputContainer.appendChild(bar);
+                });
+
+                // 输出层可视化
+                setTimeout(() => {
+                    for(let i=0; i<5; i++) {
+                        const pred = Math.round(inputs[inputs.length-1] + (Math.random()-0.5)*4);
+                        const div = document.createElement('div');
+                        div.className = 'bg-white/5 rounded p-1 flex flex-col items-center justify-center opacity-0 border border-white/5';
+                        div.style.animation = `fadeScale 0.4s ease forwards ${0.5 + i*0.1}s`;
+                        div.innerHTML = `
+                            <span class="text-[10px] text-gray-500">+${i+1}d</span>
+                            <span class="font-bold text-blue-300 text-sm">${pred}°</span>
+                        `;
+                        outContainer.appendChild(div);
+                    }
+                }, 800);
+            }
+        };
+
+        const SuggestionBox = {
+            modal: document.getElementById('suggestion-modal'),
+            content: document.getElementById('suggestion-content'),
+            open() {
+                this.modal.classList.remove('hidden');
+                setTimeout(() => {
+                    this.content.classList.remove('scale-95', 'opacity-0');
+                    this.content.classList.add('scale-100', 'opacity-100');
+                }, 10);
+            },
+            close() {
+                this.content.classList.remove('scale-100', 'opacity-100');
+                this.content.classList.add('scale-95', 'opacity-0');
+                setTimeout(() => this.modal.classList.add('hidden'), 300);
+            },
+            submit() {
+                const btn = document.querySelector('#suggestion-content button:last-child');
+                btn.textContent = "发送成功";
+                btn.classList.add('bg-green-600');
+                setTimeout(() => {
+                    this.close();
+                    setTimeout(() => {
+                        btn.textContent = "提交建议";
+                        btn.classList.remove('bg-green-600');
+                    }, 500);
+                }, 800);
+            }
+        };
+
+        const GestureCtrl = {
+            toggle() {
+                alert("摄像头手势模块需 HTTPS 环境支持。\n(Mock: 已开启手势追踪)");
+            }
+        };
+
+        window.addEventListener('load', () => App.init());
+
+    </script>
+</body>
+</html>
+
